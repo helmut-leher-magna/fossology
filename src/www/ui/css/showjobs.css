@@ -49,6 +49,21 @@
   color: white;
 }
 
+.jobTableColHeaders th[tabindex="0"] {
+  cursor: pointer;
+}
+
+.jobTableColHeaders th:focus {
+  outline: 3px solid #005a9c;
+  outline-offset: 2px;
+}
+
+.sort-indicator {
+  margin-left: 6px;
+  font-size: 10px;
+  color: lavender;
+}
+
 .jobTableNewJob td {
   text-align: center;
   font: bold 8pt verdana, arial, helvetica;

@@ -51,6 +51,66 @@ if(clockTime != "0"){
   setInterval('autoRefreshTable()', clockTime*1000); 
 }
 
+function parseNumberString(s) {
+  if (s === null || s === undefined) return NaN;
+  var str = String(s).trim();
+  var neg = false;
+  var mParen = str.match(/^\(\s*(.*)\s*\)$/);
+  if (mParen) {
+    neg = true;
+    str = mParen[1];
+  }
+
+  // Decimal-comma locale: e.g. 1.234.567,89 -> 1234567.89
+  var mDecComma = str.match(/[+-]?(?:\d{1,3}(?:\.\d{3})+)(?:,\d+)?(?:[eE][+-]?\d+)?/);
+  if (mDecComma) {
+    var tokenStr = mDecComma[0];
+    var dotCount = (tokenStr.match(/\./g) || []).length;
+    if (tokenStr.indexOf(',') !== -1 || dotCount > 1) {
+      var token = tokenStr.replace(/\./g, '').replace(/,/g, '.');
+      var v = parseFloat(token);
+      return neg ? -v : v;
+    }
+    // Otherwise fall through: single-dot values like "0.123" will be
+    // handled by the generic/fallback patterns below and parsed as decimals.
+  }
+
+  // Grouping with commas/spaces/apostrophes: 1,234,567 or 1 234 567 or 1'234'567
+  var mGrouping = str.match(/[+-]?(?:\d{1,3}(?:[ ,\u00A0']\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+  if (mGrouping) {
+    var token = mGrouping[0].replace(/[ ,\u00A0']/g, '');
+    var v = parseFloat(token);
+    return neg ? -v : v;
+  }
+
+  // Fallback: generic numeric token including exponent and decimal dot
+  var mGeneric = str.match(/[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?/);
+  if (mGeneric) {
+    var token = mGeneric[0];
+    var v = parseFloat(token);
+    return neg ? -v : v;
+  }
+
+  return NaN;
+}
+
+function parseDateKey(s) {
+  if (s === null || s === undefined) return NaN;
+  var str = String(s);
+  var m = str.match(/(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)/);
+  if (m) {
+    var ts = m[1].replace('T',' ');
+    var parts = ts.split(/[\s:-]/);
+    var y = +parts[0], mo = +parts[1]-1, d = +parts[2], hh = +parts[3]||0, mm = +parts[4]||0, ss = +parts[5]||0;
+    return Date.UTC(y, mo, d, hh, mm, ss);
+  }
+  var m2 = str.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (m2) {
+    return Date.UTC(+m2[3], +m2[2]-1, +m2[1], +m2[4], +m2[5], +(m2[6]||0));
+  }
+  return NaN;
+}
+
 function createShowJobsTable(data)
 {
   var mainTBody = $("#showjobstable tbody");
@@ -119,85 +179,114 @@ function createTableForJob(job) {
       }
     }
   });
-  tableTemplate.html('<thead><tr><th></th>' +
+  tableTemplate.html('<thead>' +
+    '<tr><th></th>' +
     '<th colspan="6" class="text-center">' + uploadLink + '</th><th style="color:black">' +
-    allJobsStatus +' '+ uploadETA + '</th></tr>' + '</thead><tbody></tbody>');
+    allJobsStatus +' '+ uploadETA + '</th></tr>' +
+    '<tr class="jobTableColHeaders">' +
+    '<th scope="col">{{ "Job/Dependency"|trans }}</th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "Status"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "Agent/Type"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "Items"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "Start Time - End Time"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "Average items/sec"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col" tabindex="0" aria-sort="none">{{ "ETA"|trans }} <span class="sort-indicator"></span></th>' +
+    '<th scope="col">{{ "Actions"|trans }}</th>' +
+    '</tr>' +
+    '</thead><tbody></tbody>');
   return tableTemplate;
 }
 
 function fillTableWithJobInfo(tableTemplate, job) {
   var tbody = tableTemplate.children("tbody");
-  $('<tr class="jobTableNewJob">' +
-    '<td>{{ "Job/Dependency"|trans }}</td><td>{{ "Status"|trans }}</td>' +
-    '<td colspan="3">' + job.jobName + '</td><td>{{ "Average items/sec"|trans }}' +
-    '</td><td>{{ "ETA"|trans }}</td><td></td></tr>').appendTo(tbody);
+  // Build header row safely: set job name as text to avoid DOM XSS.
+  var $headerRow = $('<tr>').addClass('jobTableNewJob');
+  $headerRow.append($('<td></td>'), $('<td></td>'));
+  $headerRow.append($('<td colspan="3" class="text-center"></td>').text(job && job.jobName ? job.jobName : ''));
+  $headerRow.append($('<td></td>'), $('<td></td>'), $('<td></td>'));
+  tbody.append($headerRow);
   $.each(job.jobQueue, function(jobQueueId, jobQueueData) {
-    var action = "";
-    if (jobQueueData.canDoActions && jobQueueData.isInProgress){
-      if (jobQueueData.jq_endtext == "Paused") {
-        action += '[<a href="' + fullUri + '&action=restart&jobid=' + jobQueueId;
-        action += '" title="{{ 'Un-Pause this job'|trans }}">{{ 'Resume'|trans }}</a>]';
-      } else {
-        action += '[<a href="' + fullUri + '&action=pause&jobid=' + jobQueueId;
-        action += '" title="{{ 'Pause this job'|trans }}">{{ 'Pause'|trans }}</a>]';
-      }
-      action += ' [<a href="' + fullUri + '&action=cancel&jobid=' + jobQueueId;
-      action += '" title="{{ 'Cancel this job'|trans }}">{{ 'Cancel'|trans }}</a>]';
-    } else if (jobQueueData.download.length > 0 && jobQueueData.isReady) {
-      action += '[<a href="?mod=download&report=' + job.jobId + '">Download ' +
-        jobQueueData.download + '</a>]';
-    }
-    if ('isNoOfMonkBulk' in jobQueueData) {
-      action += '[{{ 'Count : '|trans }}<a href="#" title="isNoOfMonkBulk">' +
-        jobQueueData.isNoOfMonkBulk + '</a>]';
-    }
-
-    var jobQD = "<a href='?mod=showjobs&upload=-1&job=" + jobQueueId + "'>" + jobQueueId + "</a>";
-    if(jobQueueData.depends[0] !== null) {
-      var dependsList = [];
-      $.each(jobQueueData.depends, function(i, dependId) {
-        dependsList.push("<a href='?mod=showjobs&upload=-1&job=" + dependId + "'>" + dependId + "</a>");
-      });
-      jobQD += ' / ' + dependsList.join(' / ');
-    }
-    var trClass = "jobQueued";
-    var jqET = "";
-    if (jobQueueData.jq_endtext !== null) {
-      jqET = jobQueueData.jq_endtext;
-    }
-    var jqType = jobQueueData.jq_type;
-    var jqItemsProcessed = jobQueueData.jq_itemsprocessed;
-    var jqTime = "";
-    if (jobQueueData.jq_starttime !== null) {
-      jqTime += jobQueueData.jq_starttime.substring(0,16);
-      trClass = "jobScheduled";
-    }
-    if (jobQueueData.jq_endtime !== null) {
-      jqTime += ' - ' + jobQueueData.jq_endtime.substring(0,16);
-      trClass = "jobFinished";
-    }
-    var jqItemsPerSec = jobQueueData.itemsPerSec.toPrecision(5);
-    var jqETA = "";
-    if ('eta' in jobQueueData) {
-      if (jobQueueData.eta !== null) {
-        jqETA = jobQueueData.eta;
-      }
+    // Render a single job-queue row. Sorting/state is handled elsewhere.
+    var trClass = '';
+    if (jobQueueData.jq_end_bits > 1) {
+      trClass = 'jobFailed';
+    } else if (jobQueueData.jq_starttime && !jobQueueData.jq_endtime) {
+      trClass = 'jobScheduled';
+    } else if (jobQueueData.jq_starttime && jobQueueData.jq_endtime) {
+      trClass = 'jobFinished';
     } else {
-      jqETA = "{{ "Scanned"|trans }}";
-    }
-    if (jqET.indexOf("Fail") !== -1 || jqET.indexOf("kill") !== -1) {
-      trClass = "jobFailed";
+      trClass = 'jobQueued';
     }
 
-    $("<tr class='" + trClass + "'><td>" + jobQD + "</td>" +
-      "<td>" + jqET + "</td>" +
-      "<td>" + jqType + "</td>" +
-      "<td>" + jqItemsProcessed + " {{ "items"|trans }}</td>" +
-      "<td>" + jqTime + "</td>" +
-      "<td>" + jqItemsPerSec + " {{ "items/sec"|trans }}</td>" +
-      "<td>" + jqETA + "</td>" +
-      "<td class='jobAction'>" + action + "</td></tr>"
-    ).appendTo(tbody);
+    // Job/Dependency cell: show job id and dependencies (if any)
+    var jobIds = [];
+    if (jobQueueData.jq_pk) jobIds.push(jobQueueData.jq_pk);
+    if (jobQueueData.depends && jobQueueData.depends.length) {
+      jobQueueData.depends.forEach(function(d) { if (d) jobIds.push(d); });
+    }
+    var jobQD = jobIds.map(function(id) {
+      return '<a href="?mod=showjobs&job=' + id + '">' + id + '</a>';
+    }).join(' / ');
+
+    // Status cell
+    var jqET = jobQueueData.jq_endtext ? jobQueueData.jq_endtext : '';
+    if (!jqET && jobQueueData.jq_end_bits) {
+      if (jobQueueData.jq_end_bits == 1) jqET = '{{ "Success"|trans }}';
+      else if (jobQueueData.jq_end_bits == 2) jqET = '{{ "Failure"|trans }}';
+      else if (jobQueueData.jq_end_bits == 4) jqET = '{{ "Nonfatal"|trans }}';
+    }
+
+    var jqType = jobQueueData.jq_type || '';
+    var jqItemsProcessed = (typeof jobQueueData.jq_itemsprocessed !== 'undefined') ? jobQueueData.jq_itemsprocessed : '';
+    // Preserve previous UX: if only endtime exists, show leading dash (" - 2026-..."),
+    // if only starttime exists, show trailing dash ("2026-... - "), and if neither,
+    // render empty string (avoid bare ' - ').
+    var jqTime = '';
+    if (jobQueueData.jq_starttime || jobQueueData.jq_endtime) {
+      if (jobQueueData.jq_starttime) jqTime += jobQueueData.jq_starttime;
+      jqTime += ' - ';
+      if (jobQueueData.jq_endtime) jqTime += jobQueueData.jq_endtime;
+    }
+    var jqItemsPerSec = (typeof jobQueueData.itemsPerSec !== 'undefined') ? jobQueueData.itemsPerSec : '';
+    var jqETA = '';
+    if (typeof jobQueueData.eta !== 'undefined' && jobQueueData.eta !== null && jobQueueData.eta !== '') {
+      jqETA = jobQueueData.eta;
+    } else if (jobQueueData.jq_end_bits && jobQueueData.jq_end_bits !== 0) {
+      jqETA = '{{ "Scanned"|trans }}';
+    } else {
+      jqETA = '';
+    }
+
+    // Actions: download if ready, and admin/user actions if permitted
+    var action = '';
+    if (jobQueueData.download && jobQueueData.isReady) {
+      action += '<a href="?mod=download&report=' + jobQueueData.jq_job_fk + '">' + jobQueueData.download + '</a>';
+    }
+    if (jobQueueData.canDoActions) {
+      var jqpk = jobQueueData.jq_pk ? jobQueueData.jq_pk : '';
+      var actionBase = fullUri + '&action=';
+      action += (action ? ' ' : '') + '[<a href="' + actionBase + 'pause&jobid=' + jqpk + '">{{ "Pause"|trans }}</a>]';
+      action += ' [<a href="' + actionBase + 'restart&jobid=' + jqpk + '">{{ "Restart"|trans }}</a>]';
+      action += ' [<a href="' + actionBase + 'cancel&jobid=' + jqpk + '">{{ "Cancel"|trans }}</a>]';
+    }
+
+    // Build row safely with jQuery. Show monk bulk counts in Items column.
+    var $row = $('<tr>').addClass(trClass);
+    $row.append($('<td>').html(jobQD));
+    $row.append($('<td>').text(jqET));
+    $row.append($('<td>').text(jqType));
+    var itemsText = (jqItemsProcessed !== '' ? (String(jqItemsProcessed) + ' ' + "{{ 'items'|trans|e('js') }}") : '');
+    var $tdItems = $('<td>').text(itemsText);
+    if (jobQueueData.isNoOfMonkBulk) {
+      $tdItems.append($('<span>').addClass('monk-bulk-count').text(' (' + String(jobQueueData.isNoOfMonkBulk) + ')'));
+    }
+    $row.append($tdItems);
+    $row.append($('<td>').text(jqTime));
+    var speedText = (jqItemsPerSec !== '' ? (String(jqItemsPerSec) + ' ' + "{{ 'items/sec'|trans|e('js') }}") : '');
+    $row.append($('<td>').text(speedText));
+    $row.append($('<td>').text(jqETA));
+    $row.append($('<td>').addClass('jobAction').html(action));
+    tbody.append($row);
   });
 }
 
@@ -222,3 +311,180 @@ function getTableBody() {
 $(document).ready(function (){
   getTableBody();
 });
+
+/*
+ * On-click sorting for job entries.
+ * Toggle sort by clicking a column header (except the first and last).
+ * If the header is inside a nested `table.jobTable`, sort rows inside that
+ * table (preserving each `.jobTableNewJob` group). Otherwise fallback to
+ * the global outer-row sort.
+ */
+// Only attach click handler to headers that are explicitly marked sortable
+$(document).on('click', '.jobTableColHeaders th[tabindex="0"]', function() {
+  var colIndex = $(this).index();
+  var $table = $(this).closest('table.jobTable');
+  // toggle ascending flag on the clicked header
+  var asc = $(this).data('asc') === true ? false : true;
+  // clear asc flag on other sortable headers (in the same table if present, otherwise globally)
+  var $headers = $table.length ? $table.find('.jobTableColHeaders th[tabindex="0"]') : $('.jobTableColHeaders th[tabindex="0"]');
+  $headers.data('asc', false);
+  $(this).data('asc', asc);
+
+  // update visual indicators and ARIA state only on sortable headers
+  $headers.find('.sort-indicator').text('');
+  $headers.attr('aria-sort', 'none');
+  $(this).find('.sort-indicator').text(asc ? '▲' : '▼');
+  $(this).attr('aria-sort', asc ? 'ascending' : 'descending');
+
+  if ($table.length) {
+    sortJobsInTable($table, colIndex, asc);
+  } else {
+    sortJobsByColumn(colIndex, asc);
+  }
+});
+
+/**
+ * Sort groups inside a single nested `table.jobTable`.
+ * Each group starts with a `.jobTableNewJob` row followed by one or more
+ * job-queue rows. Groups are sorted as units by the key found in the first
+ * job-queue row of the group.
+ */
+function sortJobsInTable($table, colIndex, asc) {
+  var $tbody = $table.children('tbody');
+  var $rows = $tbody.children('tr');
+  var groups = [];
+  var current = null;
+  $rows.each(function() {
+    var $r = $(this);
+    if ($r.hasClass('jobTableNewJob')) {
+      current = { header: $r, rows: [] };
+      groups.push(current);
+    } else {
+      if (!current) {
+        // no explicit header, create an anonymous group
+        current = { header: null, rows: [] };
+        groups.push(current);
+      }
+      current.rows.push($r);
+    }
+  });
+
+  var pairs = groups.map(function(g) {
+    var key = '';
+    if (g.rows.length > 0) {
+      key = g.rows[0].find('td').eq(colIndex).text().trim();
+    } else if (g.header) {
+      key = g.header.text().trim();
+    }
+    return { group: g, key: key };
+  });
+
+  // Use hoisted parseNumberString() and parseDateKey() defined at module scope.
+
+  pairs.forEach(function(p) {
+    p.numKey = parseNumberString(p.key);
+    p.strKey = (p.key === null || p.key === undefined) ? '' : String(p.key).trim();
+    p.dateKey = (colIndex === 4) ? parseDateKey(p.key) : NaN;
+  });
+
+  pairs.sort(function(a, b) {
+    // If sorting the "Start Time - End Time" column (index 4), prefer date comparison.
+    if (colIndex === 4) {
+      var da = a.dateKey;
+      var db = b.dateKey;
+      if (!isNaN(da) && !isNaN(db)) {
+        return asc ? da - db : db - da;
+      }
+    }
+
+    var na = a.numKey;
+    var nb = b.numKey;
+    if (!isNaN(na) && !isNaN(nb)) {
+      return asc ? na - nb : nb - na;
+    }
+    var ka = a.strKey;
+    var kb = b.strKey;
+    if (ka < kb) return asc ? -1 : 1;
+    if (ka > kb) return asc ? 1 : -1;
+    return 0;
+  });
+
+  // Rebuild tbody in sorted order, preserving headers and their associated rows.
+  $tbody.empty();
+  pairs.forEach(function(p) {
+    if (p.group.header) $tbody.append(p.group.header);
+    p.group.rows.forEach(function(r) { $tbody.append(r); });
+  });
+}
+
+// keyboard handler: trigger sort on Enter or Space for focusable headers
+$(document).on('keydown', '.jobTableColHeaders th[tabindex="0"]', function(e) {
+  var code = e.key || e.keyCode;
+  if (code === 'Enter' || code === ' ' || code === 13 || code === 32) {
+    e.preventDefault();
+    $(this).trigger('click');
+  }
+});
+
+function sortJobsByColumn(colIndex, asc) {
+  var mainTBody = $("#showjobstable tbody");
+  var jobRows = mainTBody.children('tr').filter(function() {
+    return $(this).find('table.jobTable').length > 0;
+  });
+  var pairs = [];
+  jobRows.each(function() {
+    var jobRow = $(this);
+    var hrRow = jobRow.next('tr');
+    var key = extractKeyFromRow(jobRow, colIndex);
+    pairs.push({jobRow: jobRow, hrRow: hrRow, key: key});
+  });
+
+  pairs.forEach(function(p) {
+    p.numKey = parseNumberString(p.key);
+    p.strKey = (p.key === null || p.key === undefined) ? '' : String(p.key).trim();
+    p.dateKey = (colIndex === 4) ? parseDateKey(p.key) : NaN;
+  });
+
+  pairs.sort(function(a, b) {
+    // Date-first for Start Time - End Time column
+    if (colIndex === 4) {
+      var da = a.dateKey;
+      var db = b.dateKey;
+      if (!isNaN(da) && !isNaN(db)) {
+        return asc ? da - db : db - da;
+      }
+    }
+
+    var na = a.numKey;
+    var nb = b.numKey;
+    if (!isNaN(na) && !isNaN(nb)) {
+      return asc ? na - nb : nb - na;
+    }
+
+    var ka = a.strKey;
+    var kb = b.strKey;
+    if (ka < kb) return asc ? -1 : 1;
+    if (ka > kb) return asc ? 1 : -1;
+    return 0;
+  });
+
+  // re-append in sorted order
+  mainTBody.empty();
+  pairs.forEach(function(p) {
+    mainTBody.append(p.jobRow);
+    if (p.hrRow && p.hrRow.length) {
+      mainTBody.append(p.hrRow);
+    }
+  });
+}
+
+function extractKeyFromRow(jobRow, colIndex) {
+  var table = jobRow.find('table.jobTable');
+  var firstJobQueue = table.find('tbody tr').not('.jobTableNewJob').first();
+  // column mapping: jobQueue row tds align with headers
+  var cell = firstJobQueue.find('td').eq(colIndex);
+  if (!cell || cell.length === 0) {
+    return '';
+  }
+  return cell.text().trim();
+}
