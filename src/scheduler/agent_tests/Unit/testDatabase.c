@@ -177,6 +177,55 @@ void test_database_update_job()
 }
 
 /**
+ * \brief Test that database_update_event() excludes already-known jobs via
+ *        the NOT IN clause.
+ * \test
+ * -# Prepare one test job in the database
+ * -# Call database_update_event() – job must be loaded into job_list
+ * -# Mark the in-memory job with a sentinel message
+ * -# Call database_update_event() again – the job is still in job_list with
+ *    jq_starttime NULL in the DB; the NOT IN clause must exclude it so that
+ *    its in-memory state (sentinel message) is not destroyed by a re-fetch
+ */
+void test_database_update_event_excludes_known()
+{
+  scheduler_t* scheduler;
+  job_t* job;
+  int jq_pk;
+
+  scheduler = scheduler_init(testdb, NULL);
+
+  FO_ASSERT_PTR_NULL(scheduler->db_conn);
+  database_init(scheduler);
+  FO_ASSERT_PTR_NOT_NULL(scheduler->db_conn);
+
+  jq_pk = Prepare_Testing_Data(scheduler);
+
+  /* First poll: job should be loaded from DB into job_list. */
+  database_update_event(scheduler, NULL);
+  job = g_tree_lookup(scheduler->job_list, &jq_pk);
+  FO_ASSERT_PTR_NOT_NULL_FATAL(job);
+
+  /* Mark the in-memory job with a sentinel so we can detect a re-fetch.
+   * If database_update_event() re-fetches the job on the next call it will
+   * invoke job_init() again, which sets message = NULL and frees the old
+   * job_t via the GTree destroy function. */
+  g_free(job->message);
+  job->message = g_strdup("rc2_exclusion_sentinel");
+
+  /* Second poll: jq_starttime still NULL in DB – NOT IN must exclude the job
+   * so the sentinel message survives (re-fetch would reset it to NULL). */
+  database_update_event(scheduler, NULL);
+  job = g_tree_lookup(scheduler->job_list, &jq_pk);
+  FO_ASSERT_PTR_NOT_NULL_FATAL(job);
+  FO_ASSERT_PTR_NOT_NULL(job->message);
+  FO_ASSERT_STRING_EQUAL(job->message, "rc2_exclusion_sentinel");
+
+  database_reset_queue(scheduler);
+  scheduler_destroy(scheduler);
+}
+
+/**
  * \brief Test for database_job_processed(),database_job_log(),database_job_priority()
  * \test
  * -# Initialize test database
@@ -261,11 +310,12 @@ void test_email_notify()
 
 CU_TestInfo tests_database[] =
 {
-    {"Test database_init",          test_database_init        },
-    {"Test database_exec_event",    test_database_exec_event  },
-    {"Test database_update_event",  test_database_update_event},
-    {"Test database_update_job",    test_database_update_job  },
-    {"Test database_job",           test_database_job         },
+    {"Test database_init",                         test_database_init                        },
+    {"Test database_exec_event",                   test_database_exec_event                  },
+    {"Test database_update_event",                 test_database_update_event                },
+    {"Test database_update_event excludes known",  test_database_update_event_excludes_known },
+    {"Test database_update_job",                   test_database_update_job                  },
+    {"Test database_job",                          test_database_job                         },
     CU_TEST_INFO_NULL
 };
 

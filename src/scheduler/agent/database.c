@@ -838,6 +838,27 @@ void database_exec_event(scheduler_t* scheduler, char* sql)
 }
 
 /**
+ * @brief GTraverseFunc callback: append each job's id (jq_pk) to a
+ *        comma-separated GString for use in a SQL NOT IN clause.
+ *
+ * Called by g_tree_foreach() on scheduler->job_list inside
+ * database_update_event() to build the exclusion list that prevents
+ * in-flight JB_CHECKEDOUT jobs (whose jq_starttime is still NULL in the
+ * database) from being re-fetched and consuming LIMIT slots.
+ *
+ * @param key   Pointer to the job id (int*) stored as the GTree key
+ * @param val   Unused job_t* value
+ * @param data  GString* to append to
+ * @return FALSE to continue the traversal
+ */
+static gboolean collect_known_pks(gpointer key, gpointer val, gpointer data)
+{
+  (void)val;
+  g_string_append_printf((GString*)data, ",%d", *(int*)key);
+  return FALSE;
+}
+
+/**
  * @brief Checks the job queue for any new entries.
  *
  * The number of rows fetched from the database is bounded by the sum of
@@ -858,6 +879,7 @@ void database_update_event(scheduler_t* scheduler, void* unused)
   job_t* job;
   gchar* checkout_sql;
   int   checkout_limit;
+  GString* excl_pks;
   GList* iter;
 
   if(closing)
@@ -899,9 +921,17 @@ void database_update_event(scheduler_t* scheduler, void* unused)
       checkout_limit = CHECKOUT_SIZE;
   }
 
+  /* Exclude in-memory jobs from the poll: JB_CHECKEDOUT jobs have
+   * jq_starttime NULL in the DB until the agent handshake completes, so
+   * basic_checkout would otherwise re-fetch them and waste LIMIT slots.
+   * Sentinel 0 keeps the list non-empty when job_list is empty. */
+  excl_pks = g_string_new("0");
+  g_tree_foreach(scheduler->job_list, collect_known_pks, excl_pks);
+
   /* one query for the queue rows joined with priority and user info, instead of
    * a basic_checkout plus a per-row jobsql_information lookup */
-  checkout_sql = g_strdup_printf(basic_checkout, checkout_limit);
+  checkout_sql = g_strdup_printf(basic_checkout, excl_pks->str, checkout_limit);
+  g_string_free(excl_pks, TRUE);
   db_result = database_exec(scheduler, checkout_sql);
   g_free(checkout_sql);
   if(db_result == NULL)
